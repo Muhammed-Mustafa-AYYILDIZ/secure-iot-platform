@@ -1,104 +1,121 @@
+#include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 #include "esp_log.h"
-#include "led_strip.h"
+#include "driver/i2c_master.h"
 
-// Donanım pin ve adet tanımlamaları
-#define LED_STRIP_BLINK_GPIO 48
-#define LED_STRIP_LED_NUMBERS 1
+#define I2C_MASTER_SDA_IO   8
+#define I2C_MASTER_SCL_IO   9
+#define LCD_ADDR            0x27
 
-// Loglama için terminal etiketi
-static const char *TAG = "SECURE_IOT";
+static const char *TAG = "LCD_1602";
+static i2c_master_dev_handle_t lcd_handle;
 
-// LED kontrol nesnesi (RMT sürücüsü tarafından yönetilir)
-static led_strip_handle_t led_strip;
+// PCF8574 Pin Haritası: [D7, D6, D5, D4, Backlight, EN, RW, RS]
+#define LCD_BACKLIGHT   0x08
+#define LCD_ENABLE      0x04
+#define LCD_RS_DATA     0x01
+#define LCD_RS_CMD      0x00
 
-// Görevler arası veri iletim kuyruğu handle'ı
-static QueueHandle_t s_led_count_queue = NULL;
-
-/* 
- * Donanım Katmanı Yapılandırması:
- * ESP32-S3 dahili RMT modülü üzerinden LED Strip ayarlanır.
- */
-static void configure_led(void)
+static void lcd_write_nibble(uint8_t nibble, uint8_t rs)
 {
-    led_strip_config_t strip_config = {
-        .strip_gpio_num = LED_STRIP_BLINK_GPIO,
-        .max_leds = LED_STRIP_LED_NUMBERS,
-    };
+    uint8_t data = (nibble & 0xF0) | LCD_BACKLIGHT | rs;
+    
+    // EN high pulse
+    uint8_t buf[1] = { data | LCD_ENABLE };
+    i2c_master_transmit(lcd_handle, buf, 1, 50);
+    esp_rom_delay_us(50);
 
-    led_strip_rmt_config_t rmt_config = {
-        .resolution_hz = 10 * 1000 * 1000, // 10 MHz çözünürlük
-        .flags.with_dma = false,
-    };
-
-    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
-    led_strip_clear(led_strip);
+    // EN low pulse
+    buf[0] = data & ~LCD_ENABLE;
+    i2c_master_transmit(lcd_handle, buf, 1, 50);
+    esp_rom_delay_us(50);
 }
 
-/*
- * Görev 1: Kuyruktan Veri Okuma ve Loglama (Receiver Task)
- */
-void simple_log_task(void *pvParameters)
+static void lcd_send(uint8_t value, uint8_t rs)
 {
-    uint32_t received_count = 0;
+    lcd_write_nibble(value & 0xF0, rs);        // High nibble
+    lcd_write_nibble((value << 4) & 0xF0, rs); // Low nibble
+}
 
-    while (1) {
-        // Kuyrukta veri yoksa CPU harcamadan sonsuza kadar uyur (Blocked)
-        if (xQueueReceive(s_led_count_queue, &received_count, portMAX_DELAY) == pdPASS) {
-            ESP_LOGI(TAG, "Kuyruktan veri alindi! LED tetiklenme sayisi: %lu", received_count);
-        }
+static void lcd_cmd(uint8_t cmd)
+{
+    lcd_send(cmd, LCD_RS_CMD);
+    vTaskDelay(pdMS_TO_TICKS(5));
+}
+
+static void lcd_data(uint8_t data)
+{
+    lcd_send(data, LCD_RS_DATA);
+    esp_rom_delay_us(50);
+}
+
+static void lcd_print(const char *str)
+{
+    while (*str) {
+        lcd_data((uint8_t)*str);
+        str++;
     }
 }
 
-/*
- * Görev 2: LED Yakıp Söndürme ve Sayacı Kuyruğa Yollama (Sender Task)
- */
-void led_blink_task(void *pvParameters)
+static void lcd_set_cursor(uint8_t col, uint8_t row)
 {
-    uint8_t s_led_state = 0;
-    uint32_t blink_counter = 0;
-
-    while (1) {
-        if (s_led_state) {
-            // Kırmızı renk yak
-            led_strip_set_pixel(led_strip, 0, 20, 0, 0);
-            led_strip_refresh(led_strip);
-
-            // Sayacı artır ve kuyruğa yolla
-            blink_counter++;
-            xQueueSend(s_led_count_queue, &blink_counter, 0);
-        } else {
-            // LED'i söndür
-            led_strip_clear(led_strip);
-        }
-
-        s_led_state = !s_led_state;
-        vTaskDelay(pdMS_TO_TICKS(500)); // 500 ms bekle
-    }
+    uint8_t row_offsets[] = {0x00, 0x40};
+    lcd_cmd(0x80 | (col + row_offsets[row]));
 }
 
-/*
- * Ana Giriş Noktası (app_main)
- */
+static void lcd_init(void)
+{
+    vTaskDelay(pdMS_TO_TICKS(50)); // Açılış beklemesi
+
+    // 4-bit moda geçiş sırası
+    lcd_write_nibble(0x30, LCD_RS_CMD);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    lcd_write_nibble(0x30, LCD_RS_CMD);
+    esp_rom_delay_us(150);
+    lcd_write_nibble(0x30, LCD_RS_CMD);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    lcd_write_nibble(0x20, LCD_RS_CMD); // 4-bit arayüz
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    // Fonksiyon ayarları
+    lcd_cmd(0x28); // 4-bit, 2 satır, 5x8 font
+    lcd_cmd(0x0C); // Ekran açık, imleç kapalı (Display ON, Cursor OFF)
+    lcd_cmd(0x06); // Giriş modu: Otomatik sağa kaydır
+    lcd_cmd(0x01); // Ekranı temizle
+    vTaskDelay(pdMS_TO_TICKS(5));
+}
+
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Donanim yapilandiriliyor...");
-    configure_led();
+    ESP_LOGI(TAG, "I2C ve LCD 1602 Baslatiliyor...");
 
-    // 5 eleman kapasiteli, uint32_t tipinde thread-safe kuyruk oluşturuluyor
-    s_led_count_queue = xQueueCreate(5, sizeof(uint32_t));
-    if (s_led_count_queue == NULL) {
-        ESP_LOGE(TAG, "Kuyruk olusturulamadi! Bellek yetersiz.");
-        return;
-    }
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = I2C_NUM_0,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_master_bus_handle_t bus_handle;
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &bus_handle));
 
-    ESP_LOGI(TAG, "Task'lar baslatiliyor...");
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = LCD_ADDR,
+        .scl_speed_hz = 100000,
+    };
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &dev_cfg, &lcd_handle));
 
-    // Task 1: Tüketici (Receiver)
-    xTaskCreate(simple_log_task, "log_task", 2048, NULL, 1, NULL);
+    lcd_init();
 
-    // Task 2: Üretici (Sender)
-    xTaskCreate(led_blink_task, "led_task", 2048, NULL, 1, NULL);
+    // 1. Satıra yaz
+    lcd_set_cursor(2, 0);
+    lcd_print("Burak'in YARRAĞA!");
+
+
+    
+
+    ESP_LOGI(TAG, "LCD ekran basariyla yazildi!");
 }
