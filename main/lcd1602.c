@@ -20,7 +20,7 @@ static void lcd_pulse_enable(i2c_master_dev_handle_t dev, uint8_t nibble)
 
 static void lcd_send_4bits(i2c_master_dev_handle_t dev, uint8_t data, uint8_t mode)
 {
-    // PCF8574'ün sadece 4 veri pini bağlı. 8 bitlik veriyi ikiye bölüp 4 bit / 4 bit gönderiyoruz.
+    // PCF8574'ün sadece 4 veri pini bağlı. 8 bitlik veriyi ikiye bölüp 4 bit / 4 bit gönderiyorum.
     uint8_t upper = (data & 0xF0) | mode | LCD_BACKLIGHT;         // Verinin ilk 4 biti
     uint8_t lower = ((data << 4) & 0xF0) | mode | LCD_BACKLIGHT;  // Verinin son 4 biti
     lcd_pulse_enable(dev, upper);
@@ -31,7 +31,7 @@ esp_err_t lcd_init(i2c_master_dev_handle_t dev)
 {
     vTaskDelay(pdMS_TO_TICKS(50)); // Ekranın elektriksel olarak kendine gelmesi için bekleme
     // Datasheet'te belirtilen özel başlangıç (Initialization) sinyalleri. 
-    // Ekranı 4-bit modunda çalışmaya zorluyoruz.
+    // Ekranı 4-bit modunda çalışmaya zorluyorum.
     lcd_pulse_enable(dev, 0x30 | LCD_BACKLIGHT);
     // ... (Bekleme ve diğer 0x30 komutları)
     lcd_pulse_enable(dev, 0x20 | LCD_BACKLIGHT); // 4-bit moda kesin geçiş

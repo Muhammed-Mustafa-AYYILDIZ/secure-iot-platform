@@ -30,7 +30,7 @@ esp_err_t bmp280_init(i2c_master_dev_handle_t dev)
     // 0x88 adresinden başlayarak 24 baytlık fabrika kalibrasyon verisini tek seferde çek.
     ret = i2c_master_transmit_receive(dev, &reg_calib, 1, calib_buf, 24, 1000);
 
-    // I2C 8 bit veri getirir. Biz bunları Little-Endian kuralına göre 16 bitlik (2 bayt) katsayılara dönüştürüyoruz.
+    // I2C 8 bit veri getirir. Biz bunları Little-Endian kuralına göre 16 bitlik (2 bayt) katsayılara dönüştürüyorum.
     s_calib.dig_T1 = (uint16_t)((calib_buf[1]  << 8) | calib_buf[0]); // Üst baytı 8 bit sola kaydır, alt bayt ile birleştir.
     // ... (Diğer katsayılar)
 
