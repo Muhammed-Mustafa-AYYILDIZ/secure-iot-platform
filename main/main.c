@@ -4,6 +4,7 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "driver/i2c_master.h"
+#include "wifi_app.h"
 
 #include "lcd1602.h"
 #include "bmp280.h"
@@ -79,6 +80,7 @@ static void display_task(void *pvParameters)
 void app_main(void)
 {
     ESP_LOGI(TAG, "Sistem baslatiliyor...");
+    wifi_init_sta();
 
     i2c_master_bus_config_t bus_config = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
