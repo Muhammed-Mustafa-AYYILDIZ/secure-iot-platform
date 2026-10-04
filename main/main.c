@@ -13,7 +13,11 @@
 
 static const char *TAG = "APP_ORCHESTRATOR";
 
-static QueueHandle_t s_sensor_queue = NULL;
+typedef struct {
+    float temperature;
+    float pressure;
+    uint32_t timestamp_ms;
+} sensor_data_t;
 
 typedef struct {
     i2c_master_dev_handle_t bmp_handle;
@@ -23,19 +27,26 @@ typedef struct {
     i2c_master_dev_handle_t lcd_handle;
 } display_task_params_t;
 
+static QueueHandle_t s_sensor_queue = NULL;
+
 static void sensor_task(void *pvParameters)
 {
     sensor_task_params_t *params = (sensor_task_params_t *)pvParameters;
-    bmp280_data_t sensor_data;
+    bmp280_data_t raw_bmp;
+    sensor_data_t out_data;
 
     ESP_LOGI(TAG, "Sensor gorevi baslatildi.");
 
     while (1) {
-        if (bmp280_read_data(params->bmp_handle, &sensor_data) == ESP_OK) {
-            ESP_LOGI(TAG, "[Sensor Task] Okundu -> T: %.2f C | P: %.1f hPa", 
-                     sensor_data.temperature, sensor_data.pressure);
+        if (bmp280_read_data(params->bmp_handle, &raw_bmp) == ESP_OK) {
+            out_data.temperature = raw_bmp.temperature;
+            out_data.pressure = raw_bmp.pressure;
+            out_data.timestamp_ms = pdTICKS_TO_MS(xTaskGetTickCount());
 
-            xQueueSend(s_sensor_queue, &sensor_data, 0);
+            ESP_LOGI(TAG, "[Sensor Task] [%lu ms] Okundu -> T: %.2f C | P: %.1f hPa",
+                     out_data.timestamp_ms, out_data.temperature, out_data.pressure);
+
+            xQueueOverwrite(s_sensor_queue, &out_data);
         } else {
             ESP_LOGE(TAG, "[Sensor Task] Okuma hatasi!");
         }
@@ -47,7 +58,7 @@ static void sensor_task(void *pvParameters)
 static void display_task(void *pvParameters)
 {
     display_task_params_t *params = (display_task_params_t *)pvParameters;
-    bmp280_data_t received_data;
+    sensor_data_t received_data;
     char line_buf[17];
 
     ESP_LOGI(TAG, "Ekran gorevi baslatildi.");
@@ -105,7 +116,7 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(1000));
     lcd_clear(lcd_handle);
 
-    s_sensor_queue = xQueueCreate(1, sizeof(bmp280_data_t));
+    s_sensor_queue = xQueueCreate(1, sizeof(sensor_data_t));
     if (s_sensor_queue == NULL) {
         ESP_LOGE(TAG, "Kuyruk olusturulamadi!");
         return;
