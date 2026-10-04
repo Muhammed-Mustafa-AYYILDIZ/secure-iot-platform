@@ -1,0 +1,19 @@
+                 ┌──────────────┐
+                 │  BMP280      │
+                 └──────┬───────┘
+                        │
+                        ▼
+                 ┌──────────────┐
+                 │ sensor_task  │
+                 └─┬──────────┬─┘
+      (Verinin     │          │    (Verinin
+    kopyası atılır)▼          ▼    kopyası atılır)
+        ┌────────────┐      ┌────────────┐
+        │ DISPLAY_Q  │      │ NETWORK_Q  │
+        └─────┬──────┘      └─────┬──────┘
+              │                   │
+              ▼                   ▼
+        display_task        network_task
+              │                   │
+              ▼                   ▼
+             LCD                Wi-Fi
