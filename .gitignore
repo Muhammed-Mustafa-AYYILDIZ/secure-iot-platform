@@ -3,3 +3,4 @@ sdkconfig
 sdkconfig.old
 managed_components/
 main/credentials.h
+/components/esp32-camera/esp32-camera.elf

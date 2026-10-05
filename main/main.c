@@ -1,3 +1,4 @@
+#include "udp_sender.h"
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -15,12 +16,6 @@
 static const char *TAG = "APP_ORCHESTRATOR";
 
 typedef struct {
-    float temperature;
-    float pressure;
-    uint32_t timestamp_ms;
-} sensor_data_t;
-
-typedef struct {
     i2c_master_dev_handle_t bmp_handle;
 } sensor_task_params_t;
 
@@ -28,7 +23,9 @@ typedef struct {
     i2c_master_dev_handle_t lcd_handle;
 } display_task_params_t;
 
-static QueueHandle_t s_sensor_queue = NULL;
+// İki bağımsız kuyruk
+static QueueHandle_t s_display_queue = NULL;
+static QueueHandle_t s_udp_queue = NULL;
 
 static void sensor_task(void *pvParameters)
 {
@@ -47,7 +44,13 @@ static void sensor_task(void *pvParameters)
             ESP_LOGI(TAG, "[Sensor Task] [%lu ms] Okundu -> T: %.2f C | P: %.1f hPa",
                      out_data.timestamp_ms, out_data.temperature, out_data.pressure);
 
-            xQueueOverwrite(s_sensor_queue, &out_data);
+            // Hem LCD kuyruğuna hem de UDP kuyruğuna bas
+            if (s_display_queue != NULL) {
+                xQueueOverwrite(s_display_queue, &out_data);
+            }
+            if (s_udp_queue != NULL) {
+                xQueueOverwrite(s_udp_queue, &out_data);
+            }
         } else {
             ESP_LOGE(TAG, "[Sensor Task] Okuma hatasi!");
         }
@@ -65,7 +68,7 @@ static void display_task(void *pvParameters)
     ESP_LOGI(TAG, "Ekran gorevi baslatildi.");
 
     while (1) {
-        if (xQueueReceive(s_sensor_queue, &received_data, portMAX_DELAY) == pdTRUE) {
+        if (xQueueReceive(s_display_queue, &received_data, portMAX_DELAY) == pdTRUE) {
             snprintf(line_buf, sizeof(line_buf), "Temp:  %.2f C", received_data.temperature);
             lcd_set_cursor(params->lcd_handle, 0, 0);
             lcd_send_string(params->lcd_handle, line_buf);
@@ -118,11 +121,9 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(1000));
     lcd_clear(lcd_handle);
 
-    s_sensor_queue = xQueueCreate(1, sizeof(sensor_data_t));
-    if (s_sensor_queue == NULL) {
-        ESP_LOGE(TAG, "Kuyruk olusturulamadi!");
-        return;
-    }
+    // Kuyrukları oluştur
+    s_display_queue = xQueueCreate(1, sizeof(sensor_data_t));
+    s_udp_queue     = xQueueCreate(1, sizeof(sensor_data_t));
 
     static sensor_task_params_t sensor_params;
     sensor_params.bmp_handle = bmp_handle;
@@ -131,4 +132,7 @@ void app_main(void)
     static display_task_params_t display_params;
     display_params.lcd_handle = lcd_handle;
     xTaskCreate(display_task, "display_task", 3072, &display_params, 4, NULL);
+
+    // UDP göndericiye ayrılmış kuyruğu ver
+    udp_sender_init(s_udp_queue);
 }
