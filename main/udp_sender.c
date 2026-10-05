@@ -1,3 +1,4 @@
+#include "esp_random.h"
 #include "udp_sender.h"
 #include <string.h>
 #include <errno.h>
@@ -11,35 +12,44 @@
 
 static const char *TAG = "UDP_SENDER";
 static QueueHandle_t s_udp_queue = NULL;
-static psa_key_id_t s_hmac_key = 0;
 
 // PSK'yı PSA anahtar deposuna yükler (bir kez çağrılır)
-static bool hmac_key_init(void)
+static psa_key_id_t s_aes_key = 0;
+
+// PSK'yı AES-GCM anahtarı olarak PSA deposuna yükler
+static bool aes_key_init(void)
 {
     if (psa_crypto_init() != PSA_SUCCESS) {
         return false;
     }
 
     psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_type(&attr, PSA_KEY_TYPE_HMAC);
+    psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
     psa_set_key_bits(&attr, strlen(PSK_STR) * 8);
-    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_MESSAGE);
-    psa_set_key_algorithm(&attr, PSA_ALG_HMAC(PSA_ALG_SHA_256));
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_ENCRYPT);
+    psa_set_key_algorithm(&attr, PSA_ALG_GCM);
 
     psa_status_t st = psa_import_key(&attr,
                                      (const uint8_t *)PSK_STR, strlen(PSK_STR),
-                                     &s_hmac_key);
+                                     &s_aes_key);
     psa_reset_key_attributes(&attr);
     return st == PSA_SUCCESS;
 }
 
-// data'nın HMAC-SHA256 imzasını out'a yazar (32 bayt)
-static bool compute_hmac(const uint8_t *data, size_t len, uint8_t *out)
+static bool encrypt_payload(const uint8_t *iv, const uint8_t *plaintext, size_t plain_len, uint8_t *out)
 {
     size_t out_len = 0;
-    psa_status_t st = psa_mac_compute(s_hmac_key, PSA_ALG_HMAC(PSA_ALG_SHA_256),
-                                      data, len, out, HMAC_SIZE, &out_len);
-    return (st == PSA_SUCCESS && out_len == HMAC_SIZE);
+    psa_status_t st = psa_aead_encrypt(
+        s_aes_key,
+        PSA_ALG_GCM,
+        iv, IV_SIZE,
+        NULL, 0,
+        plaintext, plain_len,
+        out, plain_len + TAG_SIZE,
+        &out_len
+    );
+
+    return (st == PSA_SUCCESS && out_len == (plain_len + TAG_SIZE));
 }
 
 static void udp_sender_task(void *pvParameters)
@@ -69,8 +79,8 @@ static void udp_sender_task(void *pvParameters)
     }
 
     // HMAC anahtarını yükle
-    if (!hmac_key_init()) {
-        ESP_LOGE(TAG, "HMAC anahtari yuklenemedi!");
+    if (!aes_key_init()) {
+        ESP_LOGE(TAG, "AES anahtari yuklenemedi!");
         close(sock);
         vTaskDelete(NULL);
         return;
@@ -94,26 +104,29 @@ static void udp_sender_task(void *pvParameters)
             uint16_t net_temp  = htons((uint16_t)temp_scaled);
             uint32_t net_press = htonl(press_scaled);
 
-            // 4. 12 baytlık payload
-            packet_buffer[0] = PROTOCOL_MAGIC_BYTE;
-            packet_buffer[1] = PROTOCOL_VERSION;
-            memcpy(&packet_buffer[2], &net_seq, 4);
-            memcpy(&packet_buffer[6], &net_temp, 2);
-            memcpy(&packet_buffer[8], &net_press, 4);
+            // 4. Şifrelencek 12 baytlık ham veriyi geçici bir dizide topla 
+            uint8_t plaintext[PAYLOAD_SIZE];
+            plaintext[0] = PROTOCOL_MAGIC_BYTE;
+            plaintext[1] = PROTOCOL_VERSION;
+            memcpy(&plaintext[2], &net_seq, 4);
+            memcpy(&plaintext[6], &net_temp, 2);
+            memcpy(&plaintext[8], &net_press, 4);
 
-            // 5. HMAC-SHA256: ilk 12 bayt imzalanır, 32 bayt sona eklenir
-            if (!compute_hmac(packet_buffer, PAYLOAD_SIZE, packet_buffer + PAYLOAD_SIZE)) {
-                ESP_LOGE(TAG, "HMAC hesaplanamadi!");
+            // 5. 12 baytlık taze IV üretip paletin başına koyuyorum [0..11]
+            esp_fill_random(packet_buffer, IV_SIZE);
+            // 6. Plaintext'i şifreleyip IV'nin hemen altına yazıyorum [12..39] (12 baytı ciphertextten 16 bayt tagdan)
+            if (!encrypt_payload(packet_buffer, plaintext, PAYLOAD_SIZE, packet_buffer + IV_SIZE)){
+                ESP_LOGE(TAG, "AES-GCM Sifreleme basarisiz!");
                 continue;
             }
-
+            //7. 40 baytık paketi gönderiyorum (12 IV + 12 Ciphertext + 16 Tag olacak şekilde)
             int err = sendto(sock, packet_buffer, PACKET_TOTAL_SIZE, 0,
                              (struct sockaddr *)&dest_addr, sizeof(dest_addr));
 
             if (err < 0) {
                 ESP_LOGE(TAG, "Gonderim hatasi! Hata kodu: %d", errno);
             } else {
-                ESP_LOGI(TAG, "Imzali paket yollandi -> Seq: %lu | T: %.2f C | P: %.1f hPa",
+                ESP_LOGI(TAG, "AES-GCM Sifreli Paket Yollandi  -> Seq: %lu | T: %.2f C | P: %.1f hPa",
                          seq_num, received_sensor.temperature, received_sensor.pressure);
                 seq_num++;
             }
